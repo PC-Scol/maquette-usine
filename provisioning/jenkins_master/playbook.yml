@@ -1,0 +1,103 @@
+- hosts: jenkins_master
+  become: yes
+  vars:
+    add_gitlab_token: "{{ lookup('file', 'scripts/load_gitlab_token.groovy') }}"
+    add_gitlab_ssh_key: "{{ lookup('file', 'scripts/load_git_ssh_key.groovy') }}"
+    configure_gitlab_connection: "{{ lookup('file', 'scripts/configure_gitlab_connection.groovy') }}"
+  roles:
+    - role: geerlingguy.java
+      when: "ansible_os_family == 'Debian'"
+      java_packages:
+        - openjdk-8-jdk
+    - role: geerlingguy.jenkins
+      jenkins_plugins: ['cloudbees-folder', 'gradle', 'git', 'ssh-agent', 'gitlab-plugin', 'workflow-aggregator', 'token-macro']
+      jenkins_plugin_timeout: 60
+  tasks:
+    - name: restart jenkins
+      service:
+        name: jenkins
+        state: restarted
+    - name: Wait untils Jenkins web API is available
+      shell: curl --head --silent http://jenkins_master:8080/cli/
+      register: result
+      until: result.stdout.find("200 OK") != -1
+      retries: 12
+      delay: 5            
+    - name: add gitlab token
+      jenkins_script:
+        script: "{{ add_gitlab_token }}"
+        user: admin
+        password: admin
+        url: http://jenkins_master:8080
+        validate_certs: no    
+      register: command_result
+      retries: 5
+      delay: 10
+      until: command_result | success        
+    - name : create keys folder
+      file:
+        path: /var/lib/jenkins/keys/ssh
+        state: directory
+        mode: 0755 
+        owner: jenkins
+        group: jenkins       
+    - name: Generate SSH keys
+      become: yes
+      become_user: jenkins
+      shell: ssh-keygen -b 2048 -t rsa -f /var/lib/jenkins/keys/ssh/id_rsa -q -N ""
+      args:
+        creates: /var/lib/jenkins/keys/ssh/id_rsa
+    - name: add gitlab ssh key
+      jenkins_script:
+        script: "{{ add_gitlab_ssh_key }}"
+        user: admin
+        password: admin
+        url: http://jenkins_master:8080
+        validate_certs: no    
+    - name: Get JSON from Session                                                                          
+      uri: 
+        url: http://gitlab/api/v4/session?login=root&password=mypassw0rd
+        return_content: yes  
+        method: POST
+        status_code: 201
+      register: session_info    
+    - debug:
+        var: session_info.json.private_token
+    - name: Get public keys on gitlab
+      uri:
+        url:  http://gitlab/api/v4/users/1/keys
+        method: GET
+        return_content: yes          
+        headers:
+          PRIVATE-TOKEN: "{{ session_info.json.private_token }}"
+        status_code: 200
+      register: gitlab_keys
+    - name: Register public key on gitlab
+      uri:
+        url:  http://gitlab/api/v4/users/1/keys
+        method: POST
+        body: "{\"key\": \"{{ lookup('file', '/var/lib/jenkins/keys/ssh/id_rsa.pub') }}\", \"title\": \"jenkinskey\"}"
+        body_format: json
+        headers:
+          Content-Type: "application/json"
+          PRIVATE-TOKEN: "{{ session_info.json.private_token }}"
+        status_code: 201
+      when: "{{ 'jenkinskey' not in gitlab_keys | map(attribute='title') }}"
+    - name: restart jenkins
+      service:
+        name: jenkins
+        state: restarted
+    - name: Wait untils Jenkins web API is available
+      shell: curl --head --silent http://jenkins_master:8080/cli/
+      register: result
+      until: result.stdout.find("200 OK") != -1
+      retries: 12
+      delay: 5                  
+    - name: configure gitlab connection
+      jenkins_script:
+        script: "{{ configure_gitlab_connection }}"
+        user: admin
+        password: admin
+        url: http://jenkins_master:8080
+        validate_certs: no    
+        

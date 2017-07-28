@@ -1,0 +1,9 @@
+- hosts: gitlab
+  gather_facts: yes
+  roles:
+    - samdoran.gitlab
+  tasks:
+    - name: gitlab reconfigure
+      shell: gitlab-ctl reconfigure
+    - name: change gitlab root password
+      shell: scripts/reset_root_password.sh
